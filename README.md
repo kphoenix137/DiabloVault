@@ -18,4 +18,9 @@ Diablo 1 and DevilutionX save files.
 Early development. Toolchain setup in progress.
 
 ## License
-MIT
+
+DiabloVault is source-available software licensed under the
+PolyForm Noncommercial License.
+
+Commercial use is not permitted without explicit permission
+from the author.
