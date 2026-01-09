@@ -10,3 +10,7 @@ add_subdirectory(core)
 add_subdirectory(gui)
 
 set_property(DIRECTORY ${CMAKE_CURRENT_SOURCE_DIR} PROPERTY VS_STARTUP_PROJECT DiabloVault)
+
+if (MSVC)
+  add_compile_options(/utf-8)
+endif()

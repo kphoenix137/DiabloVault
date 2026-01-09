@@ -4,6 +4,10 @@
 
 class QAction;
 class QLabel;
+class QTreeView;
+class QTableView;
+class QSplitter;
+
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -17,15 +21,16 @@ private slots:
 
 private:
     void createMenus();
-    void createCentralPlaceholder();
+    void createCentralLayout();
     void createStatusBar();
 
     // Actions
     QAction* actionOpenDir_ = nullptr;
     QAction* actionExit_ = nullptr;
 
-    // Simple placeholder content
-    QLabel* placeholder_ = nullptr;
+    QSplitter* splitter_ = nullptr;
+    QTreeView* containersView_ = nullptr;
+    QTableView* itemsView_ = nullptr;
 
     // State
     bool hasWorkspaceLoaded_ = false;

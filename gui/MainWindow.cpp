@@ -1,82 +1,120 @@
 #include "MainWindow.h"
 
-#include <QAction>
-#include <QLabel>
+#include "Workspace.h" // from core/ (PUBLIC include dir via DiabloVault_core)
+#include <QEnterEvent>
+#include <QHeaderView>
 #include <QMenu>
 #include <QMenuBar>
+#include <QSplitterHandle>
 #include <QStatusBar>
+#include <QTableView>
+#include <QTreeView>
 #include <qfiledialog.h>
+#include <qsplitter.h>
 
-#include "Workspace.h" // from core/ (PUBLIC include dir via DiabloVault_core)
+class SafeSplitterHandle : public QSplitterHandle {
+public:
+	using QSplitterHandle::QSplitterHandle;
+
+protected:
+	void enterEvent(QEnterEvent* e) override
+	{
+		QSplitterHandle::enterEvent(e);
+		setCursor(Qt::ArrowCursor); // avoid Qt's split cursor creation path
+	}
+};
+
+class SafeSplitter : public QSplitter {
+public:
+	using QSplitter::QSplitter;
+
+protected:
+	QSplitterHandle* createHandle() override
+	{
+		auto* h = new SafeSplitterHandle(orientation(), this);
+		h->setCursor(Qt::ArrowCursor);
+		return h;
+	}
+};
+
 
 MainWindow::MainWindow(QWidget* parent)
-    : QMainWindow(parent)
+	: QMainWindow(parent)
 {
-    setWindowTitle("DiabloVault");
-    resize(980, 640);
+	setWindowTitle("DiabloVault");
+	resize(980, 640);
 
-    createMenus();
-    createCentralPlaceholder();
-    createStatusBar();
+	createMenus();
+	createCentralLayout();
+	createStatusBar();
 
-    updateUiEnabled();
+	updateUiEnabled();
 }
 
 void MainWindow::createMenus()
 {
-    auto* fileMenu = menuBar()->addMenu("&File");
+	auto* fileMenu = menuBar()->addMenu("&File");
 
-    actionOpenDir_ = new QAction("Open &Directory...", this);
-    actionOpenDir_->setShortcut(QKeySequence::Open);
-    connect(actionOpenDir_, &QAction::triggered, this, &MainWindow::openDirectory);
-    fileMenu->addAction(actionOpenDir_);
+	actionOpenDir_ = new QAction("Open &Directory...", this);
+	actionOpenDir_->setShortcut(QKeySequence::Open);
+	connect(actionOpenDir_, &QAction::triggered, this, &MainWindow::openDirectory);
+	fileMenu->addAction(actionOpenDir_);
 
-    fileMenu->addSeparator();
+	fileMenu->addSeparator();
 
-    actionExit_ = new QAction("E&xit", this);
-    actionExit_->setShortcut(QKeySequence::Quit);
-    connect(actionExit_, &QAction::triggered, this, &QWidget::close);
-    fileMenu->addAction(actionExit_);
+	actionExit_ = new QAction("E&xit", this);
+	actionExit_->setShortcut(QKeySequence::Quit);
+	connect(actionExit_, &QAction::triggered, this, &QWidget::close);
+	fileMenu->addAction(actionExit_);
 }
 
-void MainWindow::createCentralPlaceholder()
+void MainWindow::createCentralLayout()
 {
-    placeholder_ = new QLabel(this);
-    placeholder_->setText(
-        "DiabloVault\n\n"
-        "File ? Open Directory…\n\n"
-        "This will become the main workspace view."
-    );
-    placeholder_->setAlignment(Qt::AlignCenter);
-    placeholder_->setWordWrap(true);
+	splitter_ = new SafeSplitter(this);
+	splitter_->setOrientation(Qt::Horizontal);
 
-    setCentralWidget(placeholder_);
+	containersView_ = new QTreeView(splitter_);
+	containersView_->setHeaderHidden(true);
+	containersView_->setMinimumWidth(220);
+
+	itemsView_ = new QTableView(splitter_);
+	itemsView_->horizontalHeader()->setStretchLastSection(true);
+	itemsView_->setSelectionBehavior(QAbstractItemView::SelectRows);
+	itemsView_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+
+	splitter_->addWidget(containersView_);
+	splitter_->addWidget(itemsView_);
+	splitter_->setStretchFactor(0, 0);
+	splitter_->setStretchFactor(1, 1);
+
+	setCentralWidget(splitter_);
 }
 
 void MainWindow::createStatusBar()
 {
-    // Show something “core is linked” without being a permanent UI feature.
-    statusBar()->showMessage(QString("Ready. CoreVersion=%1").arg(CoreVersion()));
+	// Show something “core is linked” without being a permanent UI feature.
+	statusBar()->showMessage(QString("Ready. CoreVersion=%1").arg(CoreVersion()));
 }
+
 
 void MainWindow::updateUiEnabled()
 {
-    // For now, Open Directory is enabled always (since we don't load yet).
-    // Later you might disable actions depending on workspace state.
-    if (actionOpenDir_ != nullptr)
-        actionOpenDir_->setEnabled(true);
+	// For now, Open Directory is enabled always (since we don't load yet).
+	// Later you might disable actions depending on workspace state.
+	if (actionOpenDir_ != nullptr)
+		actionOpenDir_->setEnabled(true);
 }
 
 void MainWindow::openDirectory()
 {
-    const QString dir = QFileDialog::getExistingDirectory(
-        this,
-        "Open Diablo save directory"
-    );
+	const QString dir = QFileDialog::getExistingDirectory(
+		this,
+		"Open Diablo save directory"
+	);
 
-    if (dir.isEmpty())
-        return;
+	if (dir.isEmpty())
+		return;
 
-    hasWorkspaceLoaded_ = true;
-    statusBar()->showMessage(QString("Selected: %1").arg(dir), 5000);
+	hasWorkspaceLoaded_ = true;
+	statusBar()->showMessage(QString("Selected: %1").arg(dir), 5000);
 }
