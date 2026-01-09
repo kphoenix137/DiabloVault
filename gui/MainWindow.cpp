@@ -70,6 +70,8 @@ void MainWindow::createMenus()
 
 void MainWindow::createCentralLayout()
 {
+	// Workaround for Qt 6.10.0 Windows Debug assert in QWindowsCursor
+	// (qpixmap_win.cpp:200) triggered by splitter resize cursor.
 	splitter_ = new SafeSplitter(this);
 	splitter_->setOrientation(Qt::Horizontal);
 
