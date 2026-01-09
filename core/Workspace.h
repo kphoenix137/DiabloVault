@@ -1,3 +1,3 @@
-// core.h
+// Workspace.h
 #pragma once
 int CoreVersion();

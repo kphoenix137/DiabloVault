@@ -1,14 +1,14 @@
-#include "../core/core.h"
+#include "Workspace.h"
 #include <QApplication>
 #include <QLabel>
 
+int main(int argc, char** argv)
+{
+	QApplication app(argc, argv);
 
-int main(int argc, char **argv) {
-  QApplication app(argc, argv);
+	QLabel label(QString("Qt Widgets OK. CoreVersion=%1").arg(CoreVersion()));
+	label.resize(360, 80);
+	label.show();
 
-  QLabel label(QString("Qt Widgets OK. CoreVersion=%1").arg(CoreVersion()));
-  label.resize(360, 80);
-  label.show();
-
-  return app.exec();
+	return app.exec();
 }
