@@ -1,46 +1,27 @@
 #include "ContainerModel.h"
 
-#include <QDir>
-#include <QFileInfo>
+#include <QString>
 
 ContainerModel::ContainerModel(QObject* parent)
 	: QAbstractItemModel(parent)
 {
 }
 
-void ContainerModel::setWorkspaceRoot(const QString& rootDir)
+void ContainerModel::setContainers(const std::vector<dv::Container> &containers)
 {
 	beginResetModel();
-
-	rootDir_.clear();
-	containerNames_.clear();
-	containerPaths_.clear();
-
-	const QDir root(rootDir);
-	if (root.exists()) {
-		rootDir_ = QDir::cleanPath(root.absolutePath());
-
-		// "Containers" = immediate subdirectories (non-hidden, not . / ..)
-		const QFileInfoList dirs = root.entryInfoList(
-			QDir::Dirs | QDir::NoDotAndDotDot | QDir::Readable | QDir::NoSymLinks,
-			QDir::Name | QDir::IgnoreCase
-		);
-
-		for (const QFileInfo& fi : dirs) {
-			containerNames_.push_back(fi.fileName());
-			containerPaths_.push_back(fi.absoluteFilePath());
-		}
-
-		// If there are no subdirectories, treat the root itself as a single container.
-		if (containerNames_.isEmpty()) {
-			containerNames_.push_back(QFileInfo(rootDir_).fileName().isEmpty()
-				? rootDir_
-				: QFileInfo(rootDir_).fileName());
-			containerPaths_.push_back(rootDir_);
-		}
-	}
-
+	containers_ = containers;
 	endResetModel();
+}
+
+QString ContainerModel::containerIdForIndex(const QModelIndex& index) const
+{
+	if (!index.isValid() || index.parent().isValid() || index.column() != 0)
+		return {};
+	const int row = index.row();
+	if (row < 0 || static_cast<size_t>(row) >= containers_.size())
+		return {};
+	return QString::fromStdString(containers_[row].id);
 }
 
 QString ContainerModel::containerPathForIndex(const QModelIndex& index) const
@@ -48,9 +29,9 @@ QString ContainerModel::containerPathForIndex(const QModelIndex& index) const
 	if (!index.isValid() || index.parent().isValid() || index.column() != 0)
 		return {};
 	const int row = index.row();
-	if (row < 0 || row >= containerPaths_.size())
+	if (row < 0 || static_cast<size_t>(row) >= containers_.size())
 		return {};
-	return containerPaths_[row];
+	return QString::fromStdString(containers_[row].path);
 }
 
 QModelIndex ContainerModel::index(int row, int column, const QModelIndex& parent) const
@@ -59,22 +40,21 @@ QModelIndex ContainerModel::index(int row, int column, const QModelIndex& parent
 		return {};
 	if (parent.isValid())
 		return {}; // single-level tree
-	if (row < 0 || row >= containerNames_.size())
+	if (row < 0 || static_cast<size_t>(row) >= containers_.size())
 		return {};
 	return createIndex(row, column, nullptr);
 }
 
 QModelIndex ContainerModel::parent(const QModelIndex& /*child*/) const
 {
-	// Single-level: all items have invalid parent.
-	return {};
+	return {}; // single-level
 }
 
 int ContainerModel::rowCount(const QModelIndex& parent) const
 {
 	if (parent.isValid())
 		return 0;
-	return containerNames_.size();
+	return static_cast<int>(containers_.size());
 }
 
 int ContainerModel::columnCount(const QModelIndex& /*parent*/) const
@@ -88,14 +68,15 @@ QVariant ContainerModel::data(const QModelIndex& index, int role) const
 		return {};
 
 	const int row = index.row();
-	if (row < 0 || row >= containerNames_.size())
+	if (row < 0 || static_cast<size_t>(row) >= containers_.size())
 		return {};
+	const dv::Container &c = containers_[row];
 
 	if (role == Qt::DisplayRole)
-		return containerNames_[row];
+		return QString::fromStdString(c.displayName);
 
 	if (role == Qt::ToolTipRole)
-		return containerPaths_[row];
+		return QString::fromStdString(c.path);
 
 	return {};
 }

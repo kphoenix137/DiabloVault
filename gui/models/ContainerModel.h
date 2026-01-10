@@ -1,7 +1,10 @@
 #pragma once
 
 #include <QAbstractItemModel>
-#include <QStringList>
+
+#include <vector>
+
+#include "Workspace.h"
 
 class ContainerModel final : public QAbstractItemModel {
 	Q_OBJECT
@@ -9,11 +12,10 @@ class ContainerModel final : public QAbstractItemModel {
 public:
 	explicit ContainerModel(QObject* parent = nullptr);
 
-	// Sets the workspace root and enumerates immediate subdirectories as "containers".
-	// If no subdirectories exist, the root itself becomes the only container.
-	void setWorkspaceRoot(const QString& rootDir);
+	void setContainers(const std::vector<dv::Container> &containers);
 
-	QString workspaceRoot() const { return rootDir_; }
+	// Returns container ID for index (or empty if invalid).
+	QString containerIdForIndex(const QModelIndex& index) const;
 
 	// Returns absolute path for the container at index (or empty if invalid).
 	QString containerPathForIndex(const QModelIndex& index) const;
@@ -27,7 +29,6 @@ public:
 	Qt::ItemFlags flags(const QModelIndex& index) const override;
 
 private:
-	QString rootDir_;
-	QStringList containerNames_;  // display names
-	QStringList containerPaths_;  // absolute paths; same length as containerNames_
+	std::vector<dv::Container> containers_;
+
 };

@@ -8,6 +8,9 @@
             "features": [
                 "widgets"
             ]
+        },
+        {
+            "name": "stormlib"
         }
     ]
 }

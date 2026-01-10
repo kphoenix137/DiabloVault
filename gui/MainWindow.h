@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QMainWindow>
+#include <QString>
 
 class QAction;
 class QTreeView;
@@ -15,6 +16,10 @@ class QModelIndex;
 
 class ContainerModel;
 class ItemModel;
+
+namespace dv {
+class Workspace;
+}
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -35,10 +40,16 @@ private:
     void createCentralLayout();
     void createStatusBar();
 
+    void openWorkspace(const QString& dir);
+    void refreshWorkspace();
+
     // Actions
     QAction* actionOpenDir_ = nullptr;
+    QAction* actionRefresh_ = nullptr;
+    QAction* actionOpenInExplorer_ = nullptr;
     QAction* actionExit_ = nullptr;
 
+    // UI
     QSplitter* splitter_ = nullptr;
     QTreeView* containersView_ = nullptr;
     QTableView* itemsView_ = nullptr;
@@ -47,8 +58,14 @@ private:
     QLineEdit* filterEdit_ = nullptr;
     QLabel* detailsLabel_ = nullptr;
 
+    // Models
     ContainerModel* containerModel_ = nullptr;
     ItemModel* itemModel_ = nullptr;
 
+    // Core
+    dv::Workspace* workspace_ = nullptr;
+
+    // State
     bool hasWorkspaceLoaded_ = false;
+    QString currentWorkspaceDir_;
 };

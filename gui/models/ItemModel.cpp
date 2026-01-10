@@ -1,43 +1,16 @@
 #include "ItemModel.h"
 
-#include <QDir>
-#include <QFileInfo>
-#include <QLocale>
+#include <QString>
 
 ItemModel::ItemModel(QObject* parent)
 	: QAbstractTableModel(parent)
 {
 }
 
-void ItemModel::setDirectory(const QString& dirPath)
+void ItemModel::setItems(const std::vector<dv::ItemRecord> &items)
 {
 	beginResetModel();
-
-	dirPath_.clear();
-	rows_.clear();
-
-	const QDir dir(dirPath);
-	if (dir.exists()) {
-		dirPath_ = QDir::cleanPath(dir.absolutePath());
-
-		// Show files (and optionally dirs) in the selected container.
-		const QFileInfoList entries = dir.entryInfoList(
-			QDir::Files | QDir::Readable | QDir::NoSymLinks | QDir::Dirs | QDir::NoDotAndDotDot,
-			QDir::DirsFirst | QDir::Name | QDir::IgnoreCase
-		);
-
-		rows_.reserve(entries.size());
-		for (const QFileInfo& fi : entries) {
-			Row r;
-			r.name = fi.fileName();
-			r.absolutePath = fi.absoluteFilePath();
-			r.isDir = fi.isDir();
-			r.sizeBytes = r.isDir ? 0 : fi.size();
-			r.modified = fi.lastModified();
-			rows_.push_back(std::move(r));
-		}
-	}
-
+	items_ = items;
 	endResetModel();
 }
 
@@ -45,13 +18,12 @@ int ItemModel::rowCount(const QModelIndex& parent) const
 {
 	if (parent.isValid())
 		return 0;
-	return rows_.size();
+	return static_cast<int>(items_.size());
 }
 
 int ItemModel::columnCount(const QModelIndex& /*parent*/) const
 {
-	// Name | Size | Modified
-	return 3;
+	return 7; // Name, Base, Quality, Affixes, ilvl, Req, Location
 }
 
 QVariant ItemModel::data(const QModelIndex& index, int role) const
@@ -61,26 +33,25 @@ QVariant ItemModel::data(const QModelIndex& index, int role) const
 
 	const int row = index.row();
 	const int col = index.column();
-	if (row < 0 || row >= rows_.size() || col < 0 || col >= 3)
+	if (row < 0 || static_cast<size_t>(row) >= items_.size())
 		return {};
-
-	const Row& r = rows_[row];
+	const dv::ItemRecord &r = items_[row];
 
 	if (role == Qt::DisplayRole) {
 		switch (col) {
-		case 0: return r.name;
-		case 1:
-			if (r.isDir) return QStringLiteral("<dir>");
-			return QLocale().formattedDataSize(r.sizeBytes);
-		case 2:
-			return r.modified.isValid()
-				? QLocale().toString(r.modified, QLocale::ShortFormat)
-				: QString{};
+		case 0: return QString::fromStdString(r.name);
+		case 1: return QString::fromStdString(r.baseType);
+		case 2: return QString::fromStdString(r.quality);
+		case 3: return QString::fromStdString(r.affixes);
+		case 4: return r.ilvl;
+		case 5: return r.reqLvl;
+		case 6: return QString::fromStdString(r.location);
+		default: return {};
 		}
 	}
 
 	if (role == Qt::ToolTipRole) {
-		return r.absolutePath;
+		return QString::fromStdString(r.sourcePath);
 	}
 
 	return {};
@@ -90,15 +61,17 @@ QVariant ItemModel::headerData(int section, Qt::Orientation orientation, int rol
 {
 	if (role != Qt::DisplayRole)
 		return {};
+	if (orientation != Qt::Horizontal)
+		return {};
 
-	if (orientation == Qt::Horizontal) {
-		switch (section) {
-		case 0: return QStringLiteral("Name");
-		case 1: return QStringLiteral("Size");
-		case 2: return QStringLiteral("Modified");
-		default: return {};
-		}
+	switch (section) {
+	case 0: return "Name";
+	case 1: return "Base";
+	case 2: return "Quality";
+	case 3: return "Affixes";
+	case 4: return "ilvl";
+	case 5: return "Req";
+	case 6: return "Location";
+	default: return {};
 	}
-
-	return {};
 }

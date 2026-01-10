@@ -1,11 +1,14 @@
 #include "MainWindow.h"
 #include <QApplication>
+#include <QCoreApplication>
 
 int main(int argc, char** argv)
 {
     QApplication app(argc, argv);
 
-    // Optional: keep this if you want a consistent style
+    QCoreApplication::setOrganizationName("DiabloVault");
+    QCoreApplication::setApplicationName("DiabloVault");
+
     app.setStyle("Fusion");
 
     MainWindow w;

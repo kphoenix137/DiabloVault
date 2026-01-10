@@ -1,6 +1,7 @@
 #include "MainWindow.h"
 
 #include <QDesktopServices>
+#include <QDir>
 #include <QEnterEvent>
 #include <QFileDialog>
 #include <QHBoxLayout>
@@ -10,6 +11,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMenuBar>
+#include <QSettings>
 #include <QSortFilterProxyModel>
 #include <QSplitter>
 #include <QSplitterHandle>
@@ -20,7 +22,8 @@
 #include <QVBoxLayout>
 
 
-#include "Workspace.h" // core placeholder
+
+#include "Workspace.h"
 #include "models/ContainerModel.h"
 #include "models/ItemModel.h"
 
@@ -59,13 +62,61 @@ MainWindow::MainWindow(QWidget* parent)
 
 	containerModel_ = new ContainerModel(this);
 	itemModel_ = new ItemModel(this);
+	workspace_ = new dv::Workspace();
 
 	createMenus();
 	createCentralLayout();
 	createStatusBar();
 
+	QSettings s;
+	const QString last = s.value("workspace/lastDir").toString();
+	if (!last.isEmpty())
+		openWorkspace(last);
+
+	updateUiEnabled();
+
+	// no mock mode
+
+}
+
+void MainWindow::openWorkspace(const QString& dir)
+{
+	if (dir.isEmpty())
+		return;
+
+	currentWorkspaceDir_ = QDir::cleanPath(dir);
+
+	const bool ok = workspace_->Open(currentWorkspaceDir_.toStdString());
+	hasWorkspaceLoaded_ = ok;
+	containerModel_->setContainers(ok ? workspace_->Containers() : std::vector<dv::Container>{});
+	itemModel_->setItems({});
+
+	// Select first container automatically
+	if (ok && containerModel_->rowCount() > 0) {
+		const QModelIndex first = containerModel_->index(0, 0, {});
+		containersView_->setCurrentIndex(first);
+		containersView_->selectionModel()->select(first, QItemSelectionModel::ClearAndSelect);
+		onContainerSelectionChanged();
+	}
+
+	if (ok) {
+		statusBar()->showMessage(QString("Workspace: %1").arg(currentWorkspaceDir_), 5000);
+		QSettings s;
+		s.setValue("workspace/lastDir", currentWorkspaceDir_);
+	} else {
+		statusBar()->showMessage("No save/stash files found in selected directory.", 5000);
+	}
 	updateUiEnabled();
 }
+
+void MainWindow::refreshWorkspace()
+{
+	if (!hasWorkspaceLoaded_ || currentWorkspaceDir_.isEmpty())
+		return;
+
+	openWorkspace(currentWorkspaceDir_);
+}
+
 
 void MainWindow::createMenus()
 {
@@ -75,6 +126,18 @@ void MainWindow::createMenus()
 	actionOpenDir_->setShortcut(QKeySequence::Open);
 	connect(actionOpenDir_, &QAction::triggered, this, &MainWindow::openDirectory);
 	fileMenu->addAction(actionOpenDir_);
+
+	actionRefresh_ = new QAction("&Refresh", this);
+	actionRefresh_->setShortcut(QKeySequence::Refresh);
+	connect(actionRefresh_, &QAction::triggered, this, &MainWindow::refreshWorkspace);
+	fileMenu->addAction(actionRefresh_);
+
+	actionOpenInExplorer_ = new QAction("Open Workspace in &Explorer", this);
+	connect(actionOpenInExplorer_, &QAction::triggered, this, [this] {
+		if (!currentWorkspaceDir_.isEmpty())
+			QDesktopServices::openUrl(QUrl::fromLocalFile(currentWorkspaceDir_));
+		});
+	fileMenu->addAction(actionOpenInExplorer_);
 
 	fileMenu->addSeparator();
 
@@ -99,31 +162,32 @@ void MainWindow::onItemSelectionChanged()
 	if (!srcIndex.isValid())
 		return;
 
-	// Column 0 tooltip in ItemModel is absolute path (we set ToolTipRole for every column)
-	const QString absPath = itemModel_->data(srcIndex, Qt::ToolTipRole).toString();
+	const QString source = itemModel_->data(srcIndex, Qt::ToolTipRole).toString();
 	const QString name = itemModel_->data(itemModel_->index(srcIndex.row(), 0), Qt::DisplayRole).toString();
-	const QString size = itemModel_->data(itemModel_->index(srcIndex.row(), 1), Qt::DisplayRole).toString();
-	const QString modified = itemModel_->data(itemModel_->index(srcIndex.row(), 2), Qt::DisplayRole).toString();
+	const QString base = itemModel_->data(itemModel_->index(srcIndex.row(), 1), Qt::DisplayRole).toString();
+	const QString quality = itemModel_->data(itemModel_->index(srcIndex.row(), 2), Qt::DisplayRole).toString();
+	const QString affixes = itemModel_->data(itemModel_->index(srcIndex.row(), 3), Qt::DisplayRole).toString();
+	const QString ilvl = itemModel_->data(itemModel_->index(srcIndex.row(), 4), Qt::DisplayRole).toString();
+	const QString req = itemModel_->data(itemModel_->index(srcIndex.row(), 5), Qt::DisplayRole).toString();
+	const QString loc = itemModel_->data(itemModel_->index(srcIndex.row(), 6), Qt::DisplayRole).toString();
 
-	detailsLabel_->setText(QString("Name: %1\nSize: %2\nModified: %3\nPath: %4")
-		.arg(name, size, modified, absPath));
+	detailsLabel_->setText(QString("Name: %1\nBase: %2\nQuality: %3\nilvl: %4  req: %5\nLoc: %6\nAffixes: %7\nSource: %8")
+		.arg(name, base, quality, ilvl, req, loc, affixes, source));
 }
 
 void MainWindow::onContainerSelectionChanged()
 {
 	const QModelIndex idx = containersView_->currentIndex();
-	const QString containerPath = containerModel_->containerPathForIndex(idx);
+	const QString id = containerModel_->containerIdForIndex(idx);
+	if (id.isEmpty() || workspace_ == nullptr) {
+		itemModel_->setItems({});
+	} else {
+		itemModel_->setItems(workspace_->LoadItemsFor(id.toStdString()));
+	}
 
-	itemModel_->setDirectory(containerPath);
-
-	if (filterEdit_)
-		filterEdit_->clear();
-
-	if (itemsView_)
-		itemsView_->clearSelection();
-
-	if (detailsLabel_)
-		detailsLabel_->clear();
+	if (filterEdit_) filterEdit_->clear();
+	if (itemsView_) itemsView_->clearSelection();
+	if (detailsLabel_) detailsLabel_->clear();
 }
 
 void MainWindow::onItemActivated(const QModelIndex& proxyIndex)
@@ -236,36 +300,34 @@ void MainWindow::createCentralLayout()
 
 void MainWindow::createStatusBar()
 {
-	statusBar()->showMessage(QString("Ready. CoreVersion=%1").arg(CoreVersion()));
+	statusBar()->showMessage(QString("Ready. CoreVersion=%1").arg(dv::CoreVersion()));
 }
 
 void MainWindow::updateUiEnabled()
 {
 	if (actionOpenDir_)
 		actionOpenDir_->setEnabled(true);
+
+	const bool hasWs = hasWorkspaceLoaded_ && !currentWorkspaceDir_.isEmpty();
+	if (actionRefresh_) actionRefresh_->setEnabled(hasWs);
+	if (actionOpenInExplorer_) actionOpenInExplorer_->setEnabled(hasWs);
+
 }
 
 void MainWindow::openDirectory()
 {
+	QSettings s;
+	const QString startDir = s.value("workspace/lastDir").toString();
+
 	const QString dir = QFileDialog::getExistingDirectory(
 		this,
-		"Open workspace directory"
+		"Open workspace directory",
+		startDir.isEmpty() ? QString() : startDir
 	);
 
 	if (dir.isEmpty())
 		return;
 
-	hasWorkspaceLoaded_ = true;
-
-	containerModel_->setWorkspaceRoot(dir);
-
-	// Select first container automatically
-	if (containerModel_->rowCount() > 0) {
-		const QModelIndex first = containerModel_->index(0, 0, {});
-		containersView_->setCurrentIndex(first);
-		containersView_->selectionModel()->select(first, QItemSelectionModel::ClearAndSelect);
-		onContainerSelectionChanged();
-	}
-
-	statusBar()->showMessage(QString("Workspace: %1").arg(dir), 5000);
+	openWorkspace(dir);
 }
+
