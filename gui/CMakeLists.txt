@@ -1,6 +1,4 @@
-cmake_minimum_required(VERSION 3.21)
-
-find_package(Qt6 REQUIRED COMPONENTS Core Widgets)
+find_package(Qt6 CONFIG REQUIRED COMPONENTS Core Gui Widgets)
 
 qt_standard_project_setup()
 
