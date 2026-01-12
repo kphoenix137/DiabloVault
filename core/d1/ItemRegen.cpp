@@ -10,6 +10,26 @@
 
 namespace dv::d1 {
 
+// DevilutionX packs indices for standard Diablo (.sv) saves in the "Diablo" index space
+// (see devilution::RemapItemIdxToDiablo). When interpreting those saves against DevilutionX TSV
+// data (which includes Hellfire-only items), we must remap them back.
+//
+// Source logic: devilution::RemapItemIdxFromDiablo in DevilutionX loadsave.cpp.
+static uint16_t RemapItemIdxFromDiablo(uint16_t i)
+{
+	// Special-case: the sorcerer player item id is different between Diablo and DevilutionX
+	// due to an inserted Hellfire-only range.
+	if (i == 5 /*IDI_SORCERER*/)
+		return 166 /*IDI_SORCERER_DIABLO*/;
+	if (i >= 156)
+		i = static_cast<uint16_t>(i + 5); // Hellfire exclusive items
+	if (i >= 88)
+		i = static_cast<uint16_t>(i + 1); // Scroll of Search
+	if (i >= 83)
+		i = static_cast<uint16_t>(i + 4); // Oils
+	return i;
+}
+
 // Devilution/Diablo LCG, compatible with how Diablo chooses random numbers.
 class DiabloLCG {
 public:
@@ -150,19 +170,30 @@ static const dv::tables::UniqueItemRow *SelectUniqueForDisplay(int baseMappingId
 UnpackedItemView RegenerateItemView(const ItemPack &pk, bool isHellfire)
 {
 	UnpackedItemView view;
-	(void)isHellfire; // presently unused for display-only regeneration
+
+	// Empty slot
 
 	if (pk.idx == 0xFFFF)
 		return view;
 
+	// Decode packed quality/identified fields.
+	const bool isIdentified = (pk.bId & 1) != 0;
+	const int packedQuality = static_cast<int>((pk.bId >> 1) & 0x7F); // item_quality in DevX
+
 	const uint16_t icreate = pk.iCreateInfo;
 	const int ilvl = static_cast<int>(icreate & CF_LEVEL);
 	view.ilvl = ilvl;
-	view.quality = (pk.bId & 1) ? "identified" : "unidentified";
+	view.quality = isIdentified ? "identified" : "unidentified";
+
+	// Remap Diablo indices back into DevilutionX mapping IDs when loading non-Hellfire saves.
+	uint16_t mappingId = pk.idx;
+	if (!isHellfire) {
+		mappingId = RemapItemIdxFromDiablo(mappingId);
+	}
 
 	using namespace dv::tables;
 	ItemDb &db = GetItemDb();
-	const ItemDataRow *base = db.IsLoaded() ? db.TryGetItemByMappingId(static_cast<int>(pk.idx)) : nullptr;
+	const ItemDataRow *base = db.IsLoaded() ? db.TryGetItemByMappingId(static_cast<int>(mappingId)) : nullptr;
 	if (base != nullptr) {
 		view.baseName = base->name;
 		view.reqStr = base->minStrength;
@@ -176,13 +207,16 @@ UnpackedItemView RegenerateItemView(const ItemPack &pk, bool isHellfire)
 	}
 
 	// Quality / naming
-	const bool wantsUnique = (icreate & CF_UNIQUE) != 0;
-	const bool wantsMagic = (icreate != 0) && !wantsUnique;
+	const bool wantsUnique = (packedQuality == 2);
+	const bool wantsMagic = (packedQuality == 1);
+	if (wantsUnique)
+		view.quality += ", unique";
+	else if (wantsMagic)
+		view.quality += ", magic";
 
 	if (wantsUnique) {
 		if (const UniqueItemRow *u = SelectUniqueForDisplay(base->mappingId, ilvl)) {
 			view.name = u->name;
-			view.quality += ", unique";
 			view.affixes = "unique";
 			return view;
 		}
@@ -201,7 +235,6 @@ UnpackedItemView RegenerateItemView(const ItemPack &pk, bool isHellfire)
 			view.name += " of ";
 			view.name += a.suffix;
 		}
-		view.quality += ", magic";
 		std::string aff;
 		if (!a.prefix.empty())
 			aff += "prefix=" + a.prefix;
