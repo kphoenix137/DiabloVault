@@ -4,6 +4,7 @@
 #include "tables/tsv.h"
 
 #include <filesystem>
+#include <unordered_map>
 
 namespace fs = std::filesystem;
 
@@ -21,6 +22,7 @@ static void ReadCommonItemRow(const TsvRow &row, ItemDataRow &out)
 	out.itemType = std::string(row.get("itemType"));
 	out.miscId = std::string(row.get("miscId"));
 	out.uniqueBaseItem = std::string(row.get("uniqueBaseItem"));
+	// Parsed enums/IDs are filled after we load all items.
 	out.name = std::string(row.get("name"));
 	out.shortName = std::string(row.get("shortName"));
 	out.minMonsterLevel = row.getInt("minMonsterLevel").value_or(0);
@@ -35,42 +37,85 @@ static void ReadCommonItemRow(const TsvRow &row, ItemDataRow &out)
 	out.value = row.getInt("value").value_or(0);
 }
 
+static ItemType ParseItemType(std::string_view value)
+{
+	// Values are from DevilutionX itemdat.tsv "itemType".
+	if (value == "Misc") return ItemType::Misc;
+	if (value == "Sword") return ItemType::Sword;
+	if (value == "Axe") return ItemType::Axe;
+	if (value == "Bow") return ItemType::Bow;
+	if (value == "Mace") return ItemType::Mace;
+	if (value == "Shield") return ItemType::Shield;
+	if (value == "LightArmor") return ItemType::LightArmor;
+	if (value == "Helm") return ItemType::Helm;
+	if (value == "MediumArmor") return ItemType::MediumArmor;
+	if (value == "HeavyArmor") return ItemType::HeavyArmor;
+	if (value == "Staff") return ItemType::Staff;
+	if (value == "Gold") return ItemType::Gold;
+	if (value == "Ring") return ItemType::Ring;
+	if (value == "Amulet") return ItemType::Amulet;
+	if (value == "None") return ItemType::None;
+	return ItemType::None;
+}
+
+static ItemMiscId ParseMiscId(std::string_view value)
+{
+	// Values are from DevilutionX itemdat.tsv "miscId".
+	if (value == "Staff") return ItemMiscId::Staff;
+	if (value == "Ring") return ItemMiscId::Ring;
+	if (value == "Amulet") return ItemMiscId::Amulet;
+	if (value == "Book") return ItemMiscId::Book;
+	if (value == "Ear") return ItemMiscId::Ear;
+	if (value == "None") return ItemMiscId::None;
+	return ItemMiscId::None;
+}
+
+static goodorevil ParseAlignment(std::string_view value)
+{
+	if (value == "Any") return GOE_ANY;
+	if (value == "Evil") return GOE_EVIL;
+	if (value == "Good") return GOE_GOOD;
+	return GOE_ANY;
+}
+
+static AffixItemType ParseAffixItemTypes(const std::vector<std::string> &tokens)
+{
+	AffixItemType mask = AffixItemType::None;
+	for (const std::string &t : tokens) {
+		if (t == "Misc") mask = mask | AffixItemType::Misc;
+		else if (t == "Bow") mask = mask | AffixItemType::Bow;
+		else if (t == "Staff") mask = mask | AffixItemType::Staff;
+		else if (t == "Weapon") mask = mask | AffixItemType::Weapon;
+		else if (t == "Shield") mask = mask | AffixItemType::Shield;
+		else if (t == "Armor") mask = mask | AffixItemType::Armor;
+	}
+	return mask;
+}
+
 static void ReadAffixRow(const TsvRow &row, AffixRow &out)
 {
 	out.name = std::string(row.get("name"));
 	out.minLevel = row.getInt("minLevel").value_or(0);
 	out.chance = row.getInt("chance").value_or(0);
 	// itemTypes is a "|" separated list in DevilutionX TSVs.
-	out.itemTypes = row.getList("itemTypes", '|');
+	out.itemTypes = ParseAffixItemTypes(row.getList("itemTypes", '|'));
+	out.alignment = ParseAlignment(row.get("alignment"));
 	out.minVal = row.getInt("minVal").value_or(0);
 	out.maxVal = row.getInt("maxVal").value_or(0);
 	out.multVal = row.getInt("multVal").value_or(0);
 }
 
-static int TryResolveBaseItemMappingId(const std::vector<ItemDataRow> &items, std::string_view token)
+static int ResolveOrAddUniqueBaseItemId(std::unordered_map<std::string, int> &map, std::string_view token)
 {
-	// Accept either an integer mapping id or a name/shortName match.
 	if (token.empty())
 		return -1;
-	bool allDigits = true;
-	for (char c : token) {
-		if (c < '0' || c > '9') {
-			allDigits = false;
-			break;
-		}
-	}
-	if (allDigits) {
-		try {
-			return std::stoi(std::string(token));
-		} catch (...) {
-			return -1;
-		}
-	}
-	for (const ItemDataRow &r : items) {
-		if (r.name == token || r.shortName == token)
-			return r.mappingId;
-	}
-	return -1;
+	const std::string key(token);
+	auto it = map.find(key);
+	if (it != map.end())
+		return it->second;
+	const int id = static_cast<int>(map.size());
+	map.emplace(key, id);
+	return id;
 }
 
 bool ItemDb::LoadFromDirectory(const std::string &txtdataDir, std::string &err)
@@ -97,6 +142,15 @@ bool ItemDb::LoadFromDirectory(const std::string &txtdataDir, std::string &err)
 		items_.emplace_back(std::move(row));
 	}
 
+	// Build unique base-item ID map and parse enums now that we have all item rows.
+	std::unordered_map<std::string, int> uniqueBaseItemIds;
+	uniqueBaseItemIds.reserve(items_.size());
+	for (ItemDataRow &it : items_) {
+		it.itemTypeEnum = ParseItemType(it.itemType);
+		it.miscIdEnum = ParseMiscId(it.miscId);
+		it.uniqueBaseItemId = ResolveOrAddUniqueBaseItemId(uniqueBaseItemIds, it.uniqueBaseItem);
+	}
+
 	if (!ReadTsvFile(uniquePath, t, err))
 		return false;
 	uniques_.reserve(t.rows.size());
@@ -105,7 +159,7 @@ bool ItemDb::LoadFromDirectory(const std::string &txtdataDir, std::string &err)
 		UniqueItemRow u;
 		u.mappingId = uniqueMappingId++;
 		u.name = std::string(r.get("name"));
-		u.uniqueBaseItemMappingId = TryResolveBaseItemMappingId(items_, r.get("uniqueBaseItem"));
+		u.uniqueBaseItemId = ResolveOrAddUniqueBaseItemId(uniqueBaseItemIds, r.get("uniqueBaseItem"));
 		u.minLevel = r.getInt("minLevel").value_or(0);
 		u.value = r.getInt("value").value_or(0);
 		uniques_.emplace_back(std::move(u));

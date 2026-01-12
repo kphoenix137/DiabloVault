@@ -4,251 +4,357 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <optional>
 #include <string>
-#include <string_view>
 #include <vector>
 
 namespace dv::d1 {
 
-// DevilutionX packs indices for standard Diablo (.sv) saves in the "Diablo" index space
-// (see devilution::RemapItemIdxToDiablo). When interpreting those saves against DevilutionX TSV
-// data (which includes Hellfire-only items), we must remap them back.
-//
-// Source logic: devilution::RemapItemIdxFromDiablo in DevilutionX loadsave.cpp.
+// Source: DevilutionX loadsave.cpp (RemapItemIdxFromDiablo)
 static uint16_t RemapItemIdxFromDiablo(uint16_t i)
 {
-	// Special-case: the sorcerer player item id is different between Diablo and DevilutionX
-	// due to an inserted Hellfire-only range.
 	if (i == 5 /*IDI_SORCERER*/)
 		return 166 /*IDI_SORCERER_DIABLO*/;
 	if (i >= 156)
-		i = static_cast<uint16_t>(i + 5); // Hellfire exclusive items
+		i = static_cast<uint16_t>(i + 5);
 	if (i >= 88)
-		i = static_cast<uint16_t>(i + 1); // Scroll of Search
+		i = static_cast<uint16_t>(i + 1);
 	if (i >= 83)
-		i = static_cast<uint16_t>(i + 4); // Oils
+		i = static_cast<uint16_t>(i + 4);
 	return i;
 }
 
-// Devilution/Diablo LCG, compatible with how Diablo chooses random numbers.
-class DiabloLCG {
+// Diablo/Devilution LCG (matches DevilutionX engine/random.hpp DiabloGenerator).
+class DiabloRng {
 public:
-	explicit DiabloLCG(uint32_t seed)
-	    : state_(seed)
+	explicit DiabloRng(uint32_t seed)
+	    : seed_(seed)
 	{
 	}
 
-	uint32_t next()
+	void SetSeed(uint32_t seed) { seed_ = seed; }
+
+	uint32_t GetSeed() const { return seed_; }
+
+	uint32_t Advance()
 	{
-		// (a * x + c) mod 2^32, where a=0x015A4E35, c=1
-		state_ = state_ * 0x015A4E35u + 1u;
-		return state_;
+		seed_ = seed_ * 0x015A4E35u + 1u;
+		return seed_;
 	}
 
-	int32_t advanceAbs()
+	int32_t AdvanceRng()
 	{
-		int32_t v = static_cast<int32_t>(next());
-		// abs(INT_MIN) is UB; mimic DevilutionX behavior (special-case)
+		int32_t v = static_cast<int32_t>(Advance());
 		if (v == static_cast<int32_t>(0x80000000u))
 			return v;
 		return v < 0 ? -v : v;
 	}
 
-	int32_t rnd(int32_t v)
+	int32_t GenerateRnd(int32_t v)
 	{
 		if (v <= 0)
 			return 0;
-		if (v <= 0x7FFF) {
-			return (advanceAbs() >> 16) % v;
-		}
-		return advanceAbs() % v;
+		if (v <= 0x7FFF)
+			return (AdvanceRng() >> 16) % v;
+		return AdvanceRng() % v;
+	}
+
+	bool FlipCoin(unsigned n = 2)
+	{
+		return (GenerateRnd(static_cast<int32_t>(n)) == 0);
+	}
+
+	void DiscardRandomValues(int n)
+	{
+		for (int i = 0; i < n; ++i)
+			Advance();
 	}
 
 private:
-	uint32_t state_;
+	uint32_t seed_;
 };
 
-// icreateinfo flags (copied from DevilutionX items.h)
+// icreateinfo flags (subset, copied from DevilutionX items.h)
 enum : uint16_t {
 	CF_LEVEL = (1u << 6) - 1u,
 	CF_ONLYGOOD = 1u << 6,
 	CF_UPER15 = 1u << 7,
 	CF_UPER1 = 1u << 8,
 	CF_UNIQUE = 1u << 9,
+	CF_SMITH = 1u << 10,
+	CF_SMITHPREMIUM = 1u << 11,
+	CF_BOY = 1u << 12,
+	CF_WITCH = 1u << 13,
+	CF_UIDOFFSET = ((1u << 4) - 1u) << 1,
 	CF_PREGEN = 1u << 15,
 };
 
-static bool ItemTypeMatches(const std::vector<std::string> &list, std::string_view itemType)
+static int GetItemBLevel(DiabloRng &rng, int lvl, dv::tables::ItemMiscId miscId, bool onlygood, bool uper15)
 {
-	if (list.empty() || itemType.empty())
-		return false;
-	for (const std::string &t : list) {
-		if (t == itemType)
-			return true;
+	// Source: DevilutionX GetItemBLevel
+	int iblvl = -1;
+	if (rng.GenerateRnd(100) <= 10
+	    || rng.GenerateRnd(100) <= lvl
+	    || onlygood
+	    || (miscId == dv::tables::ItemMiscId::Staff || miscId == dv::tables::ItemMiscId::Ring || miscId == dv::tables::ItemMiscId::Amulet)) {
+		iblvl = lvl;
 	}
-	return false;
+	if (uper15)
+		iblvl = lvl + 4;
+	return iblvl;
 }
 
-struct SelectedAffixes {
-	std::string prefix;
-	std::string suffix;
-};
-
-static SelectedAffixes SelectAffixesForDisplay(uint32_t seed, int ilvl, std::string_view itemType)
+static dv::tables::AffixItemType GetAffixItemType(const dv::tables::ItemDataRow &base)
 {
 	using namespace dv::tables;
-	SelectedAffixes out;
-	ItemDb &db = GetItemDb();
-	if (!db.IsLoaded())
-		return out;
+	switch (base.itemTypeEnum) {
+	case ItemType::Sword:
+	case ItemType::Axe:
+	case ItemType::Mace:
+		return AffixItemType::Weapon;
+	case ItemType::Bow:
+		return AffixItemType::Bow;
+	case ItemType::Shield:
+		return AffixItemType::Shield;
+	case ItemType::LightArmor:
+	case ItemType::Helm:
+	case ItemType::MediumArmor:
+	case ItemType::HeavyArmor:
+		return AffixItemType::Armor;
+	case ItemType::Staff:
+		return AffixItemType::Staff;
+	case ItemType::Ring:
+	case ItemType::Amulet:
+		return AffixItemType::Misc;
+	default:
+		return AffixItemType::None;
+	}
+}
 
-	DiabloLCG rng(seed);
-	// Roughly emulate the first RNG consumption in GetItemAttrs.
-	rng.next();
+static std::optional<const dv::tables::AffixRow *> SelectAffix(
+    DiabloRng &rng,
+    const std::vector<dv::tables::AffixRow> &affixList,
+    dv::tables::AffixItemType type,
+    int minlvl, int maxlvl,
+    bool onlygood,
+    dv::tables::goodorevil goe)
+{
+	using namespace dv::tables;
+	std::vector<const AffixRow *> eligible;
+	eligible.reserve(256);
 
-	auto selectOne = [&](bool isPrefix) -> std::string {
-		// Build candidate list with weights.
-		struct Cand {
-			const AffixRow *row;
-			int weight;
-		};
-		std::vector<Cand> cands;
-		int total = 0;
-		// We don't have a direct accessor by range; iterate by index.
-		for (int i = 0;; ++i) {
-			const AffixRow *r = isPrefix ? db.TryGetPrefixByIndex(i) : db.TryGetSuffixByIndex(i);
-			if (r == nullptr)
-				break;
-			if (r->chance <= 0)
-				continue;
-			if (r->minLevel > ilvl)
-				continue;
-			if (!ItemTypeMatches(r->itemTypes, itemType))
-				continue;
-			cands.push_back({ r, r->chance });
-			total += r->chance;
+	for (const AffixRow &a : affixList) {
+		if (!HasAnyOf(type, a.itemTypes))
+			continue;
+		if (a.minLevel < minlvl || a.minLevel > maxlvl)
+			continue;
+		// DevilutionX uses PLOk to reject "bad" powers for onlygood. TSV doesn't expose that,
+		// but alignment filtering still matters for many items.
+		if ((goe == GOE_GOOD && a.alignment == GOE_EVIL) || (goe == GOE_EVIL && a.alignment == GOE_GOOD))
+			continue;
+
+		for (int i = 0; i < a.chance; ++i)
+			eligible.push_back(&a);
+	}
+
+	if (eligible.empty())
+		return std::nullopt;
+
+	return eligible[static_cast<size_t>(rng.GenerateRnd(static_cast<int32_t>(eligible.size())))];
+}
+
+struct ChosenAffixes {
+	const dv::tables::AffixRow *prefix = nullptr;
+	const dv::tables::AffixRow *suffix = nullptr;
+};
+
+static ChosenAffixes GetItemPowerPrefixAndSuffix(
+    DiabloRng &rng,
+    const dv::tables::ItemDb &db,
+    int minlvl, int maxlvl,
+    dv::tables::AffixItemType flgs,
+    bool onlygood)
+{
+	using namespace dv::tables;
+	ChosenAffixes out;
+
+	bool allocatePrefix = rng.FlipCoin(4);
+	bool allocateSuffix = !rng.FlipCoin(3);
+	if (!allocatePrefix && !allocateSuffix) {
+		if (rng.FlipCoin())
+			allocatePrefix = true;
+		else
+			allocateSuffix = true;
+	}
+
+	goodorevil goe = GOE_ANY;
+	if (!onlygood && !rng.FlipCoin(3))
+		onlygood = true;
+
+	if (allocatePrefix) {
+		std::optional<const AffixRow *> p = SelectAffix(rng, db.Prefixes(), flgs, minlvl, maxlvl, onlygood, goe);
+		if (p.has_value()) {
+			out.prefix = *p;
+			goe = out.prefix->alignment;
 		}
-		if (cands.empty() || total <= 0)
-			return {};
-		int pick = rng.rnd(total);
-		for (const auto &c : cands) {
-			pick -= c.weight;
-			if (pick < 0)
-				return c.row->name;
-		}
-		return cands.back().row->name;
-	};
+	}
 
-	// For display we attempt both prefix and suffix; real game rules are more nuanced.
-	out.prefix = selectOne(true);
-	out.suffix = selectOne(false);
+	if (allocateSuffix) {
+		std::optional<const AffixRow *> s = SelectAffix(rng, db.Suffixes(), flgs, minlvl, maxlvl, onlygood, goe);
+		if (s.has_value())
+			out.suffix = *s;
+	}
+
 	return out;
 }
 
-static const dv::tables::UniqueItemRow *SelectUniqueForDisplay(int baseMappingId, int ilvl)
+static std::string GenerateMagicItemName(
+    const std::string &baseName,
+    const dv::tables::AffixRow *prefix,
+    const dv::tables::AffixRow *suffix)
 {
-	using namespace dv::tables;
-	ItemDb &db = GetItemDb();
-	if (!db.IsLoaded())
-		return nullptr;
+	std::string out;
+	if (prefix != nullptr)
+		out += prefix->name + " ";
+	out += baseName;
+	if (suffix != nullptr)
+		out += " of " + suffix->name;
+	return out;
+}
 
-	// Vanilla tends to pick the last applicable unique for a base.
-	const UniqueItemRow *best = nullptr;
+static const dv::tables::UniqueItemRow *PickUniqueByOffset(const dv::tables::ItemDb &db, int baseItemId, int lvl, int uidOffset)
+{
+	// Source: DevilutionX GetValidUniques + CheckUnique selection order.
+	std::vector<const dv::tables::UniqueItemRow *> valid;
 	for (int i = 0;; ++i) {
-		const UniqueItemRow *u = db.TryGetUniqueByIndex(i);
+		const auto *u = db.TryGetUniqueByIndex(i);
 		if (u == nullptr)
 			break;
-		if (u->uniqueBaseItemMappingId != baseMappingId)
+		if (u->uniqueBaseItemId != baseItemId)
 			continue;
-		if (u->minLevel > ilvl)
+		if (lvl < u->minLevel)
 			continue;
-		best = u;
+		valid.push_back(u);
 	}
-	return best;
+	if (valid.empty())
+		return nullptr;
+	if (uidOffset < 0 || static_cast<size_t>(uidOffset) >= valid.size())
+		return nullptr;
+	return valid[valid.size() - 1 - static_cast<size_t>(uidOffset)];
 }
 
 UnpackedItemView RegenerateItemView(const ItemPack &pk, bool isHellfire)
 {
 	UnpackedItemView view;
-
-	// Empty slot
-
 	if (pk.idx == 0xFFFF)
 		return view;
 
-	// Decode packed quality/identified fields.
+	// Packed identification bit is stable.
 	const bool isIdentified = (pk.bId & 1) != 0;
-	const int packedQuality = static_cast<int>((pk.bId >> 1) & 0x7F); // item_quality in DevX
-
-	const uint16_t icreate = pk.iCreateInfo;
-	const int ilvl = static_cast<int>(icreate & CF_LEVEL);
-	view.ilvl = ilvl;
 	view.quality = isIdentified ? "identified" : "unidentified";
 
-	// Remap Diablo indices back into DevilutionX mapping IDs when loading non-Hellfire saves.
 	uint16_t mappingId = pk.idx;
-	if (!isHellfire) {
+	if (!isHellfire)
 		mappingId = RemapItemIdxFromDiablo(mappingId);
-	}
 
 	using namespace dv::tables;
 	ItemDb &db = GetItemDb();
 	const ItemDataRow *base = db.IsLoaded() ? db.TryGetItemByMappingId(static_cast<int>(mappingId)) : nullptr;
-	if (base != nullptr) {
-		view.baseName = base->name;
-		view.reqStr = base->minStrength;
-		view.reqMag = base->minMagic;
-		view.reqDex = base->minDexterity;
-	}
-
 	if (base == nullptr) {
 		view.name = "(unknown item)";
 		return view;
 	}
 
-	// Quality / naming
-	const bool wantsUnique = (packedQuality == 2);
-	const bool wantsMagic = (packedQuality == 1);
-	if (wantsUnique)
-		view.quality += ", unique";
-	else if (wantsMagic)
-		view.quality += ", magic";
+	view.baseName = base->name;
+	view.reqStr = base->minStrength;
+	view.reqMag = base->minMagic;
+	view.reqDex = base->minDexterity;
 
-	if (wantsUnique) {
-		if (const UniqueItemRow *u = SelectUniqueForDisplay(base->mappingId, ilvl)) {
-			view.name = u->name;
-			view.affixes = "unique";
-			return view;
-		}
-		// If no unique found, fall back to magic naming.
-	}
+	const uint16_t icreate = pk.iCreateInfo;
+	const int lvl = static_cast<int>(icreate & CF_LEVEL);
+	view.ilvl = lvl;
+	const bool onlygood = (icreate & (CF_ONLYGOOD | CF_SMITHPREMIUM | CF_BOY | CF_WITCH)) != 0;
+	const bool uper15 = (icreate & CF_UPER15) != 0;
+	const int uidOffset = static_cast<int>((icreate & CF_UIDOFFSET) >> 1);
 
-	if (wantsMagic) {
-		SelectedAffixes a = SelectAffixesForDisplay(pk.iSeed, ilvl, base->itemType);
-		view.name.clear();
-		if (!a.prefix.empty()) {
-			view.name += a.prefix;
-			view.name += ' ';
-		}
-		view.name += base->name;
-		if (!a.suffix.empty()) {
-			view.name += " of ";
-			view.name += a.suffix;
-		}
-		std::string aff;
-		if (!a.prefix.empty())
-			aff += "prefix=" + a.prefix;
-		if (!a.suffix.empty()) {
-			if (!aff.empty())
-				aff += ", ";
-			aff += "suffix=" + a.suffix;
-		}
-		view.affixes = std::move(aff);
+	// If the item is not "created" (icreate==0), the name is always the base name.
+	if (icreate == 0) {
+		view.name = base->name;
 		return view;
 	}
 
-	// Normal/base item
-	view.name = base->name;
+	DiabloRng rng(pk.iSeed);
+
+	// The original generation path consumes RNG values before deciding affixes/uniques.
+	// We replicate the subset that affects prefix/suffix selection.
+	// (See DevilutionX GetTranslatedItemNameMagical for vendor/source-specific discards.)
+
+	// GetItemAttrs (always consumes 1)
+	rng.DiscardRandomValues(1);
+
+	int minlvl = 0;
+	int maxlvl = 0;
+	if ((icreate & CF_SMITHPREMIUM) != 0) {
+		// RndVendorItem and GetItemAttrs
+		rng.DiscardRandomValues(2);
+		minlvl = lvl / 2;
+		maxlvl = lvl;
+	} else if ((icreate & CF_BOY) != 0) {
+		rng.DiscardRandomValues(2);
+		minlvl = lvl;
+		maxlvl = lvl * 2;
+	} else if ((icreate & CF_WITCH) != 0) {
+		rng.DiscardRandomValues(2);
+		int iblvl = -1;
+		if (rng.GenerateRnd(100) <= 5)
+			iblvl = 2 * lvl;
+		if (iblvl == -1 && base->miscIdEnum == ItemMiscId::Staff)
+			iblvl = 2 * lvl;
+		minlvl = iblvl / 2;
+		maxlvl = iblvl;
+	} else {
+		// GetItemBLevel + CheckUnique consumes additional RNG.
+		const int iblvl = GetItemBLevel(rng, lvl, base->miscIdEnum, onlygood, uper15);
+		minlvl = iblvl / 2;
+		maxlvl = iblvl;
+		// CheckUnique roll
+		rng.DiscardRandomValues(1);
+	}
+
+	minlvl = std::min(minlvl, 25);
+
+	// Unique regeneration: if CF_UNIQUE is set, the unique is fully determined by base item + lvl + uidOffset.
+	if ((icreate & CF_UNIQUE) != 0) {
+		const UniqueItemRow *u = PickUniqueByOffset(db, base->uniqueBaseItemId, maxlvl, uidOffset);
+		if (u != nullptr) {
+			view.name = isIdentified ? u->name : base->name;
+			view.quality += ", unique";
+			view.affixes = "unique";
+			return view;
+		}
+		// Fall through to magic naming if the unique cannot be resolved.
+	}
+
+	const AffixItemType affixType = GetAffixItemType(*base);
+	if (affixType == AffixItemType::None || maxlvl < 0) {
+		view.name = base->name;
+		return view;
+	}
+
+	const ChosenAffixes aff = GetItemPowerPrefixAndSuffix(rng, db, minlvl, maxlvl, affixType, onlygood);
+	const std::string identifiedName = GenerateMagicItemName(base->name, aff.prefix, aff.suffix);
+	view.name = isIdentified ? identifiedName : base->name;
+	view.quality += ", magic";
+
+	std::string a;
+	if (aff.prefix != nullptr)
+		a += "prefix=" + aff.prefix->name;
+	if (aff.suffix != nullptr) {
+		if (!a.empty())
+			a += ", ";
+		a += "suffix=" + aff.suffix->name;
+	}
+	view.affixes = std::move(a);
 	return view;
 }
 
