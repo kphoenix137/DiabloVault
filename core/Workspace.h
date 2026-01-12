@@ -10,7 +10,7 @@
 namespace dv {
 
 // Bump this whenever the core-side API/data model changes in a way that the GUI depends on.
-constexpr int kCoreVersion = 2;
+constexpr int kCoreVersion = 3;
 
 int CoreVersion();
 
@@ -33,7 +33,7 @@ struct ItemRecord {
 	std::string quality;
 	std::string affixes;
 	int ilvl = 0;
-	int reqLvl = 0;
+	std::string req;
 	std::string location;
 	std::string sourcePath; // where this came from (tooltip)
 };

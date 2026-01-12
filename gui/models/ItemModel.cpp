@@ -44,7 +44,7 @@ QVariant ItemModel::data(const QModelIndex& index, int role) const
 		case 2: return QString::fromStdString(r.quality);
 		case 3: return QString::fromStdString(r.affixes);
 		case 4: return r.ilvl;
-		case 5: return r.reqLvl;
+		case 5: return QString::fromStdString(r.req);
 		case 6: return QString::fromStdString(r.location);
 		default: return {};
 		}

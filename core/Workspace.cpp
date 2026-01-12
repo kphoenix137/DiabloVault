@@ -1,6 +1,7 @@
 // Workspace.cpp
 
 #include "Workspace.h"
+#include "d1/ItemRegen.h"
 
 #include <algorithm>
 #include <cctype>
@@ -14,9 +15,89 @@
 #include "d1/D1Packed.h"
 #include "d1/MpqStorm.h"
 
+#include "tables/itemdat.h"
+#include "util/exepath.h"
+
 namespace fs = std::filesystem;
 
 namespace dv {
+
+	static void EnsureItemDbLoadedOnce()
+	{
+		static bool attempted = false;
+		if (attempted)
+			return;
+		attempted = true;
+		auto &db = dv::tables::GetItemDb();
+		if (db.IsLoaded())
+			return;
+		std::string err;
+		const std::string txtdataDir = dv::util::GetDefaultTxtdataDir();
+		(void)db.LoadFromDirectory(txtdataDir, err);
+		// Best-effort: if loading fails, we still display fallback data.
+	}
+
+	static std::string DescribeCreateInfo(uint16_t ci)
+	{
+		// Mirrors DevilutionX icreateinfo_flag semantics.
+		constexpr uint16_t CF_LEVEL = (1 << 6) - 1;
+		constexpr uint16_t CF_ONLYGOOD = 1 << 6;
+		constexpr uint16_t CF_UPER15 = 1 << 7;
+		constexpr uint16_t CF_UPER1 = 1 << 8;
+		constexpr uint16_t CF_UNIQUE = 1 << 9;
+		constexpr uint16_t CF_SMITH = 1 << 10;
+		constexpr uint16_t CF_SMITHPREMIUM = 1 << 11;
+		constexpr uint16_t CF_BOY = 1 << 12;
+		constexpr uint16_t CF_WITCH = 1 << 13;
+		constexpr uint16_t CF_HEALER = 1 << 14;
+		constexpr uint16_t CF_PREGEN = 1 << 15;
+
+		std::string s;
+		s += "lvl=" + std::to_string(ci & CF_LEVEL);
+		auto add = [&](const char *name) {
+			if (!s.empty())
+				s += ", ";
+			s += name;
+		};
+		if ((ci & CF_UNIQUE) != 0)
+			add("unique");
+		if ((ci & CF_ONLYGOOD) != 0)
+			add("onlygood");
+		if ((ci & CF_UPER15) != 0)
+			add("uper15");
+		if ((ci & CF_UPER1) != 0)
+			add("uper1");
+		if ((ci & CF_SMITH) != 0)
+			add("smith");
+		if ((ci & CF_SMITHPREMIUM) != 0)
+			add("smithpremium");
+		if ((ci & CF_BOY) != 0)
+			add("boy");
+		if ((ci & CF_WITCH) != 0)
+			add("witch");
+		if ((ci & CF_HEALER) != 0)
+			add("healer");
+		if ((ci & CF_PREGEN) != 0)
+			add("pregen");
+		return s;
+	}
+
+	static void FillRecordFromPackedItem(ItemRecord &r, const d1::ItemPack &ip)
+	{
+		EnsureItemDbLoadedOnce();
+		const bool isHellfire = (ip.dwBuff & 0x1) != 0; // CF_HELLFIRE in dwBuff (flag2)
+		const dv::d1::UnpackedItemView view = dv::d1::RegenerateItemView(ip, isHellfire);
+
+		r.name = view.name.empty() ? "(unknown item)" : view.name;
+		r.baseType = view.baseName;
+		r.quality = view.quality;
+		r.affixes = view.affixes;
+		r.ilvl = view.ilvl;
+		// Fill requirements columns from regenerated view.
+		r.req = (view.reqStr != 0 || view.reqMag != 0 || view.reqDex != 0)
+		    ? ("Str" + std::to_string(view.reqStr) + "/Mag" + std::to_string(view.reqMag) + "/Dex" + std::to_string(view.reqDex))
+		    : "";
+	}
 
 	int CoreVersion()
 	{
@@ -267,30 +348,16 @@ namespace dv {
 				if (!f)
 					return items;
 
-				// Header row: show character identity in the first columns.
-				{
-					ItemRecord r;
-					r.sourcePath = c->path + "/hero";
-					r.name = std::string(pack.pName);
-					r.baseType = "Class=" + std::to_string(pack.pClass);
-					r.quality = "Level=" + std::to_string(pack.pLevel);
-					r.affixes = "XP=" + std::to_string(pack.pExperience);
-					r.location = "(character)";
-					items.push_back(std::move(r));
-				}
-
 				auto addPacked = [&](const d1::ItemPack& ip, const std::string& loc) {
-					if (ip.idx == 0)
+					// Empty slots are typically 0x0000 or 0xFFFF depending on format.
+					if (ip.idx == 0 || ip.idx == 0xFFFF)
 						return;
 					ItemRecord r;
 					r.sourcePath = c->path + "/hero";
-					r.name = "(packed item)";
-					r.baseType = "idx=" + std::to_string(ip.idx);
-					r.quality = ip.bId != 0 ? "identified" : "unidentified";
-					r.affixes = "seed=" + std::to_string(ip.iSeed) + ", val=" + std::to_string(ip.wValue);
+					FillRecordFromPackedItem(r, ip);
 					r.location = loc;
 					items.push_back(std::move(r));
-					};
+				};
 
 				// Body equipment
 				for (int i = 0; i < d1::NumInvLoc; ++i)
@@ -426,27 +493,16 @@ namespace dv {
 						d1::PlayerPack pack{};
 						std::memcpy(&pack, raw.data(), sizeof(pack));
 
-						ItemRecord hdr;
-						hdr.sourcePath = c->path + "::hero";
-						hdr.name = std::string(pack.pName);
-						hdr.baseType = "Class=" + std::to_string(pack.pClass);
-						hdr.quality = "Level=" + std::to_string(pack.pLevel);
-						hdr.affixes = "XP=" + std::to_string(pack.pExperience);
-						hdr.location = "(packed hero)";
-						items.push_back(std::move(hdr));
-
-						auto addPacked = [&](const d1::ItemPack& ip, const std::string& loc) {
-							if (ip.idx == 0)
-								return;
-							ItemRecord r;
-							r.sourcePath = c->path + "::hero";
-							r.name = "(packed item)";
-							r.baseType = "idx=" + std::to_string(ip.idx);
-							r.quality = ip.bId != 0 ? "identified" : "unidentified";
-							r.affixes = "seed=" + std::to_string(ip.iSeed) + ", val=" + std::to_string(ip.wValue);
-							r.location = loc;
-							items.push_back(std::move(r));
-							};
+					auto addPacked = [&](const d1::ItemPack& ip, const std::string& loc) {
+						// Empty slots are typically 0x0000 or 0xFFFF depending on format.
+						if (ip.idx == 0 || ip.idx == 0xFFFF)
+							return;
+						ItemRecord r;
+						r.sourcePath = c->path + "::hero";
+						FillRecordFromPackedItem(r, ip);
+						r.location = loc;
+						items.push_back(std::move(r));
+					};
 
 						for (int i = 0; i < d1::NumInvLoc; ++i)
 							addPacked(pack.InvBody[i], "Body[" + std::to_string(i) + "]");

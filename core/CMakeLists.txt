@@ -2,6 +2,14 @@ add_library(DiabloVault_core STATIC
     Workspace.cpp
     Workspace.h
 
+    tables/itemdat.cpp
+    tables/itemdat.h
+    tables/tsv.cpp
+    tables/tsv.h
+
+    util/exepath.cpp
+    util/exepath.h
+
     devx/codec.cpp
     devx/codec.h
     devx/sha.cpp
@@ -9,6 +17,9 @@ add_library(DiabloVault_core STATIC
 
     d1/MpqStorm.h
     d1/MpqStorm.cpp
+
+    d1/ItemRegen.h
+    d1/ItemRegen.cpp
 )
 
 target_include_directories(DiabloVault_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
