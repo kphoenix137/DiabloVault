@@ -4,6 +4,8 @@ add_library(DiabloVault_core STATIC
 
     devx/codec.cpp
     devx/codec.h
+    devx/sha.cpp
+    devx/sha.h
 
     d1/MpqStorm.h
     d1/MpqStorm.cpp
@@ -11,12 +13,8 @@ add_library(DiabloVault_core STATIC
 
 target_include_directories(DiabloVault_core PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
 
-if(WIN32)
-    target_link_libraries(DiabloVault_core PRIVATE advapi32)
-endif()
-
-# DiabloVault always supports reading packed MPQ saves.
-target_compile_definitions(DiabloVault_core PUBLIC DIABLOVAULT_ENABLE_STORMLIB=1)
+ # DiabloVault always supports reading packed MPQ saves.
+ target_compile_definitions(DiabloVault_core PUBLIC DIABLOVAULT_ENABLE_STORMLIB=1)
 
 # These must exist because StormLib::storm's INTERFACE_LINK_LIBRARIES references them.
 find_package(ZLIB REQUIRED)
