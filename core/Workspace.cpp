@@ -57,14 +57,14 @@ namespace dv {
 		return ContainerKind::Unknown;
 	}
 
+	// Matches DevilutionX passwords (pfile.cpp).
+	constexpr const char* PASSWORD_SPAWN_SINGLE = "adslhfb1";
+	constexpr const char* PASSWORD_SPAWN_MULTI = "lshbkfg1";
+	constexpr const char* PASSWORD_SINGLE = "xrgyrkj1";
+	constexpr const char* PASSWORD_MULTI = "szqnlsk1";
+
 	static bool DecodeInPlaceTryPasswords(std::vector<std::byte>& buf, std::size_t& decodedLen, std::string_view filenameLowerNoExt)
 	{
-		// Matches DevilutionX passwords (pfile.cpp).
-		constexpr const char* PASSWORD_SPAWN_SINGLE = "adslhfb1";
-		constexpr const char* PASSWORD_SPAWN_MULTI = "lshbkfg1";
-		constexpr const char* PASSWORD_SINGLE = "xrgyrkj1";
-		constexpr const char* PASSWORD_MULTI = "szqnlsk1";
-
 		// Try the likely password first based on filename, then fall back to all.
 		const char* preferred = PASSWORD_SINGLE;
 		if (StartsWith(filenameLowerNoExt, "multi_"))
@@ -84,6 +84,68 @@ namespace dv {
 			return true;
 		}
 		return false;
+	}
+
+	static bool DecodeStashInPlaceTryPasswords(std::vector<std::byte>& buf, std::size_t& decodedLen, std::string_view internalOrFileNameLower)
+	{
+		// Prefer based on which stash stream it is.
+		const char* preferred = PASSWORD_SINGLE;
+		if (internalOrFileNameLower.find("mpstashitems") != std::string_view::npos)
+			preferred = PASSWORD_MULTI;
+		else if (internalOrFileNameLower.find("spstashitems") != std::string_view::npos)
+			preferred = PASSWORD_SINGLE;
+
+		const char* candidates[] = { preferred, PASSWORD_SINGLE, PASSWORD_MULTI, PASSWORD_SPAWN_SINGLE, PASSWORD_SPAWN_MULTI };
+		for (const char* pw : candidates) {
+			std::vector<std::byte> tmp = buf;
+			const std::size_t outLen = dv::devx::codec_decode(tmp.data(), tmp.size(), pw);
+			std::fprintf(stderr, "stash codec_decode name='%.*s' pw='%s' -> outLen=%zu\n",
+				(int)internalOrFileNameLower.size(), internalOrFileNameLower.data(), pw, outLen);
+			if (outLen == 0)
+				continue;
+			buf.swap(tmp);
+			decodedLen = outLen;
+			return true;
+		}
+		return false;
+	}
+
+	static bool ReadFileAll(const fs::path& path, std::vector<std::byte>& out)
+	{
+		std::ifstream f(path, std::ios::binary);
+		if (!f)
+			return false;
+		f.seekg(0, std::ios::end);
+		const std::streamoff sz = f.tellg();
+		if (sz <= 0)
+			return false;
+		f.seekg(0, std::ios::beg);
+		out.resize((std::size_t)sz);
+		f.read(reinterpret_cast<char*>(out.data()), sz);
+		return (bool)f;
+	}
+
+	static uint32_t ReadLE32(const std::byte* p)
+	{
+		return (uint32_t)(uint8_t)p[0]
+			| ((uint32_t)(uint8_t)p[1] << 8)
+			| ((uint32_t)(uint8_t)p[2] << 16)
+			| ((uint32_t)(uint8_t)p[3] << 24);
+	}
+
+	static bool ParseStashHeaderSummary(const std::vector<std::byte>& decoded, std::size_t decodedLen, uint8_t& outVer, uint32_t& outGold, uint32_t& outPages)
+	{
+		// After decode, stash begins with:
+		//   uint8_t version
+		//   uint32_t gold
+		//   uint32_t pages
+		if (decodedLen < 1 + 4 + 4)
+			return false;
+		const auto* p = decoded.data();
+		outVer = (uint8_t)p[0];
+		outGold = ReadLE32(p + 1);
+		outPages = ReadLE32(p + 1 + 4);
+		return true;
 	}
 
 	bool Workspace::Open(const std::string& rootDir)
@@ -247,23 +309,28 @@ namespace dv {
 
 			if (c->kind == ContainerKind::SharedStash) {
 				auto addStashSummary = [&](const char* fileName, const std::string& label) {
-					std::ifstream sf(p / fileName, std::ios::binary);
-					if (!sf)
+					std::vector<std::byte> raw;
+					if (!ReadFileAll(p / fileName, raw))
 						return;
+
+					std::vector<std::byte> decoded = raw;
+					std::size_t decodedLen = 0;
+					const std::string nameLower = ToLower(std::string(fileName));
+					if (!DecodeStashInPlaceTryPasswords(decoded, decodedLen, nameLower))
+						return;
+
 					uint8_t version = 0;
 					uint32_t gold = 0;
 					uint32_t pages = 0;
-					sf.read(reinterpret_cast<char*>(&version), sizeof(version));
-					sf.read(reinterpret_cast<char*>(&gold), sizeof(gold));
-					sf.read(reinterpret_cast<char*>(&pages), sizeof(pages));
-					if (!sf)
+					if (!ParseStashHeaderSummary(decoded, decodedLen, version, gold, pages))
 						return;
+
 					ItemRecord r;
 					r.sourcePath = (p / fileName).string();
 					r.name = label;
 					r.baseType = "ver=" + std::to_string(version);
 					r.quality = "gold=" + std::to_string(gold);
-					r.affixes = "pages=" + std::to_string(pages);
+					r.affixes = "pages=" + std::to_string(pages) + ", decoded=" + std::to_string(decodedLen);
 					r.location = "(stash summary)";
 					items.push_back(std::move(r));
 					};
@@ -274,89 +341,145 @@ namespace dv {
 			}
 		}
 
-		// Packed MPQ saves (*.sv/*.hsv) are detected but not parsed in this milestone.
 		// Packed MPQ saves (*.sv/*.hsv).
-		// If StormLib is enabled, we can read and decode at least the 'hero' record.
+		// If StormLib is enabled, we can read and decode at least key records.
 		{
-			std::string err;
-			std::vector<std::byte> raw;
 			const std::string stemLower = ToLower(fs::path(c->path).stem().string());
-			if (dv::d1::ReadMpqFileStorm(c->path, "hero", raw, err)) {
-				std::size_t decodedLen = 0;
 
-				std::fprintf(stderr, "MPQ open OK: %s hero bytes=%zu\n", c->path.c_str(), raw.size());
+			// --- Packed stash MPQ: read spstashitems/mpstashitems (no "hero") ---
+			if (c->kind == ContainerKind::SharedStash) {
+				auto tryStashEntry = [&](const char* internalName, const char* label) {
+					std::string err;
+					std::vector<std::byte> raw;
+					if (!dv::d1::ReadMpqFileStorm(c->path, internalName, raw, err)) {
+						return;
+					}
 
-				if (raw.size() >= 16) {
-					const auto* b = reinterpret_cast<const unsigned char*>(raw.data());
-					std::fprintf(stderr,
-						"hero[0..15]=%02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X %02X\n",
-						b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-						b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15]);
-				}
-				if (raw.size() >= 8) {
-					const auto* b = reinterpret_cast<const unsigned char*>(raw.data());
-					const size_t n = raw.size();
-					std::fprintf(stderr,
-						"hero[last8]=%02X %02X %02X %02X %02X %02X %02X %02X\n",
-						b[n - 8], b[n - 7], b[n - 6], b[n - 5], b[n - 4], b[n - 3], b[n - 2], b[n - 1]);
-				}
+					std::fprintf(stderr, "MPQ open OK: %s %s bytes=%zu\n",
+						c->path.c_str(), internalName, raw.size());
 
-				if (DecodeInPlaceTryPasswords(raw, decodedLen, stemLower) && decodedLen >= sizeof(d1::PlayerPack)) {
-					d1::PlayerPack pack{};
-					std::memcpy(&pack, raw.data(), sizeof(pack));
-
-					ItemRecord hdr;
-					hdr.sourcePath = c->path + "::hero";
-					hdr.name = std::string(pack.pName);
-					hdr.baseType = "Class=" + std::to_string(pack.pClass);
-					hdr.quality = "Level=" + std::to_string(pack.pLevel);
-					hdr.affixes = "XP=" + std::to_string(pack.pExperience);
-					hdr.location = "(packed hero)";
-					items.push_back(std::move(hdr));
-
-					auto addPacked = [&](const d1::ItemPack& ip, const std::string& loc) {
-						if (ip.idx == 0)
-							return;
+					std::vector<std::byte> decoded = raw;
+					std::size_t decodedLen = 0;
+					const std::string nameLower = ToLower(std::string(internalName));
+					if (!DecodeStashInPlaceTryPasswords(decoded, decodedLen, nameLower)) {
 						ItemRecord r;
-						r.sourcePath = c->path + "::hero";
-						r.name = "(packed item)";
-						r.baseType = "idx=" + std::to_string(ip.idx);
-						r.quality = ip.bId != 0 ? "identified" : "unidentified";
-						r.affixes = "seed=" + std::to_string(ip.iSeed) + ", val=" + std::to_string(ip.wValue);
-						r.location = loc;
+						r.sourcePath = c->path + "::" + internalName;
+						r.name = std::string(label) + " (failed decode)";
+						r.baseType = "Check password/format";
+						r.affixes = "raw=" + std::to_string(raw.size());
+						r.location = "decode";
 						items.push_back(std::move(r));
-						};
+						return;
+					}
 
-					for (int i = 0; i < d1::NumInvLoc; ++i)
-						addPacked(pack.InvBody[i], "Body[" + std::to_string(i) + "]");
-					for (int i = 0; i < d1::InventoryGridCells; ++i)
-						addPacked(pack.InvList[i], "Inventory[" + std::to_string(i) + "]");
-					for (int i = 0; i < d1::MaxBeltItems; ++i)
-						addPacked(pack.SpdList[i], "Belt[" + std::to_string(i) + "]");
+					uint8_t version = 0;
+					uint32_t gold = 0;
+					uint32_t pages = 0;
+					if (!ParseStashHeaderSummary(decoded, decodedLen, version, gold, pages)) {
+						ItemRecord r;
+						r.sourcePath = c->path + "::" + internalName;
+						r.name = std::string(label) + " (bad header)";
+						r.baseType = "decodedLen=" + std::to_string(decodedLen);
+						r.affixes = "Could not parse version/gold/pages";
+						r.location = "parse";
+						items.push_back(std::move(r));
+						return;
+					}
 
-					return items;
+					ItemRecord r;
+					r.sourcePath = c->path + "::" + internalName;
+					r.name = label;
+					r.baseType = "ver=" + std::to_string(version);
+					r.quality = "gold=" + std::to_string(gold);
+					r.affixes = "pages=" + std::to_string(pages) + ", decoded=" + std::to_string(decodedLen);
+					r.location = "(packed stash summary)";
+					items.push_back(std::move(r));
+					};
+
+				// Try both; either may be absent.
+				tryStashEntry("spstashitems", "SP Stash");
+				tryStashEntry("mpstashitems", "MP Stash");
+
+				if (items.empty()) {
+					ItemRecord r;
+					r.sourcePath = c->path;
+					r.name = "(packed stash)";
+					r.baseType = "MPQ";
+					r.quality = "Not loaded";
+					r.affixes = "Could not open spstashitems/mpstashitems";
+					r.location = "packed";
+					items.push_back(std::move(r));
 				}
-				// Decode failed.
-				ItemRecord r;
-				r.sourcePath = c->path;
-				r.name = "(failed to decode 'hero')";
-				r.baseType = "Check password/format";
-				r.affixes = "Try enabling StormLib + correct save type";
-				r.location = err;
-				items.push_back(std::move(r));
 				return items;
 			}
 
-			// Either StormLib disabled or cannot open MPQ.
-			ItemRecord r;
-			r.sourcePath = c->path;
-			r.name = "(packed save)";
-			r.baseType = "MPQ";
-			r.quality = "Not loaded";
-			r.affixes = err.empty() ? "Enable DIABLOVAULT_ENABLE_STORMLIB" : err;
-			r.location = "packed";
-			items.push_back(std::move(r));
-			return items;
+			// --- Packed character save MPQ: read "hero" ---
+			{
+				std::string err;
+				std::vector<std::byte> raw;
+				if (dv::d1::ReadMpqFileStorm(c->path, "hero", raw, err)) {
+					std::size_t decodedLen = 0;
+
+					std::fprintf(stderr, "MPQ open OK: %s hero bytes=%zu\n", c->path.c_str(), raw.size());
+
+					if (DecodeInPlaceTryPasswords(raw, decodedLen, stemLower) && decodedLen >= sizeof(d1::PlayerPack)) {
+						d1::PlayerPack pack{};
+						std::memcpy(&pack, raw.data(), sizeof(pack));
+
+						ItemRecord hdr;
+						hdr.sourcePath = c->path + "::hero";
+						hdr.name = std::string(pack.pName);
+						hdr.baseType = "Class=" + std::to_string(pack.pClass);
+						hdr.quality = "Level=" + std::to_string(pack.pLevel);
+						hdr.affixes = "XP=" + std::to_string(pack.pExperience);
+						hdr.location = "(packed hero)";
+						items.push_back(std::move(hdr));
+
+						auto addPacked = [&](const d1::ItemPack& ip, const std::string& loc) {
+							if (ip.idx == 0)
+								return;
+							ItemRecord r;
+							r.sourcePath = c->path + "::hero";
+							r.name = "(packed item)";
+							r.baseType = "idx=" + std::to_string(ip.idx);
+							r.quality = ip.bId != 0 ? "identified" : "unidentified";
+							r.affixes = "seed=" + std::to_string(ip.iSeed) + ", val=" + std::to_string(ip.wValue);
+							r.location = loc;
+							items.push_back(std::move(r));
+							};
+
+						for (int i = 0; i < d1::NumInvLoc; ++i)
+							addPacked(pack.InvBody[i], "Body[" + std::to_string(i) + "]");
+						for (int i = 0; i < d1::InventoryGridCells; ++i)
+							addPacked(pack.InvList[i], "Inventory[" + std::to_string(i) + "]");
+						for (int i = 0; i < d1::MaxBeltItems; ++i)
+							addPacked(pack.SpdList[i], "Belt[" + std::to_string(i) + "]");
+
+						return items;
+					}
+
+					// Decode failed.
+					ItemRecord r;
+					r.sourcePath = c->path;
+					r.name = "(failed to decode 'hero')";
+					r.baseType = "Check password/format";
+					r.affixes = "Try enabling StormLib + correct save type";
+					r.location = err;
+					items.push_back(std::move(r));
+					return items;
+				}
+
+				// Either StormLib disabled or cannot open MPQ.
+				ItemRecord r;
+				r.sourcePath = c->path;
+				r.name = "(packed save)";
+				r.baseType = "MPQ";
+				r.quality = "Not loaded";
+				r.affixes = err.empty() ? "Enable DIABLOVAULT_ENABLE_STORMLIB" : err;
+				r.location = "packed";
+				items.push_back(std::move(r));
+				return items;
+			}
 		}
 	}
 
